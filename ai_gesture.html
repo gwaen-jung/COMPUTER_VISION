@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Cyberpunk Hand Tracking</title>
+    <!-- MediaPipe dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050a0f;
+            color: #ffffff;
+            font-family: 'Share Tech Mono', monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            border: 2px solid #ffffff;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.3), inset 0 0 20px rgba(255, 255, 255, 0.3);
+            background: rgba(10, 10, 15, 0.8);
+        }
+
+        .corner {
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            border-color: #ffffff;
+            border-style: solid;
+        }
+
+        .corner-tl { top: -2px; left: -2px; border-width: 4px 0 0 4px; }
+        .corner-tr { top: -2px; right: -2px; border-width: 4px 4px 0 0; }
+        .corner-bl { bottom: -2px; left: -2px; border-width: 0 0 4px 4px; }
+        .corner-br { bottom: -2px; right: -2px; border-width: 0 4px 4px 0; }
+
+        video, img, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .hud-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            z-index: 10;
+            background: 
+                linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 20;
+            background: rgba(20, 25, 30, 0.7);
+            border: 1px solid #ffffff;
+            padding: 15px;
+            backdrop-filter: blur(5px);
+        }
+
+        .status { margin-bottom: 10px; font-size: 1.2em; }
+        .status span { color: #ff6666; font-weight: bold; animation: pulse 1s alternate infinite; }
+        
+        .gesture-box {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 20;
+            border: 1px solid #ff6666;
+            padding: 10px 20px;
+            background: rgba(30, 10, 15, 0.7);
+            text-align: center;
+        }
+
+        .gesture-text {
+            font-size: 2em;
+            color: #ff6666;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px #ff6666;
+        }
+
+        @keyframes pulse {
+            from { text-shadow: 0 0 5px #ffffff; }
+            to { text-shadow: 0 0 15px #ffffff, 0 0 25px #ffffff; }
+        }
+
+        .scanning-bar {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 5px;
+            background: #ffffff;
+            box-shadow: 0 0 15px #ffffff;
+            animation: scan 3s linear infinite;
+            z-index: 5;
+            opacity: 0.5;
+        }
+
+        @keyframes scan {
+            0% { top: 0; opacity: 0; }
+            10% { opacity: 0.5; }
+            90% { opacity: 0.5; }
+            100% { top: 100%; opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="corner corner-tl"></div>
+        <div class="corner corner-tr"></div>
+        <div class="corner corner-bl"></div>
+        <div class="corner corner-br"></div>
+        
+        <!-- Stream from ESP32 -->
+        <img id="esp32_stream" src="/stream" crossorigin="anonymous" style="display:none;" />
+        
+        <canvas id="output_canvas"></canvas>
+        <div class="scanning-bar"></div>
+        <div class="hud-overlay"></div>
+
+        <div class="info-panel">
+            <div class="status">AI CORE: <span style="color:#ffffff;">ONLINE</span></div>
+            <div class="status">TARGET: <span id="target_status">SEARCHING...</span></div>
+            <div>SYS.FREQ: 160MHz (ESP32-S3)</div>
+            <div>NET: CINQ_LAP_HOTSPOT</div>
+        </div>
+
+        <div class="gesture-box">
+            <div style="font-size:0.8em; color:#aaa;">DETECTED GESTURE</div>
+            <div class="gesture-text" id="gesture_result">NONE</div>
+        </div>
+    </div>
+
+    <script>
+        const espStream = document.getElementById('esp32_stream');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const gestureResult = document.getElementById('gesture_result');
+        const targetStatus = document.getElementById('target_status');
+
+        canvasElement.width = 800;
+        canvasElement.height = 600;
+
+        function onResults(results) {
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            // Draw the ESP32 stream to the canvas
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                targetStatus.innerText = "LOCKED";
+                targetStatus.style.color = "#ff6666";
+
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#ffffff', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#ff6666', lineWidth: 1, radius: 3});
+                    
+                    // Simple gesture logic
+                    const thumbTip = landmarks[4];
+                    const indexTip = landmarks[8];
+                    const middleTip = landmarks[12];
+                    const ringTip = landmarks[16];
+                    const pinkyTip = landmarks[20];
+                    const wrist = landmarks[0];
+
+                    const isIndexUp = indexTip.y < landmarks[6].y;
+                    const isMiddleUp = middleTip.y < landmarks[10].y;
+                    const isRingUp = ringTip.y < landmarks[14].y;
+                    const isPinkyUp = pinkyTip.y < landmarks[18].y;
+
+                    if (isIndexUp && isMiddleUp && !isRingUp && !isPinkyUp) {
+                        gestureResult.innerText = "PEACE (V)";
+                    } else if (!isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp) {
+                        gestureResult.innerText = "FIST";
+                    } else if (isIndexUp && isMiddleUp && isRingUp && isPinkyUp) {
+                        gestureResult.innerText = "OPEN HAND";
+                    } else {
+                        gestureResult.innerText = "TRACKING...";
+                    }
+                }
+            } else {
+                targetStatus.innerText = "SEARCHING...";
+                targetStatus.style.color = "#ffffff";
+                gestureResult.innerText = "NONE";
+            }
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults(onResults);
+
+        let processing = false;
+        async function processFrame() {
+            if (!processing && espStream.complete && espStream.naturalHeight !== 0) {
+                processing = true;
+                await hands.send({image: espStream});
+                processing = false;
+            }
+            requestAnimationFrame(processFrame);
+        }
+
+        // Start processing once the image starts loading
+        espStream.onload = () => {
+            if (!processing) {
+                processFrame();
+            }
+        };
+        // Fallback in case onload doesn't fire continuously for MJPEG
+        processFrame();
+    </script>
+</body>
+</html>
